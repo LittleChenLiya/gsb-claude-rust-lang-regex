@@ -1360,6 +1360,7 @@ extern crate std;
 
 pub use crate::error::Error;
 
+pub use crate::stream::{StreamError, StreamFinder, StreamMatch};
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 
 mod builders;
@@ -1370,6 +1371,7 @@ mod find_byte;
 mod pattern;
 mod regex;
 mod regexset;
+mod stream;
 
 /// Escapes all regular expression meta characters in `pattern`.
 ///
