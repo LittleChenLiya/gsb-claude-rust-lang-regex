@@ -1370,6 +1370,7 @@ mod find_byte;
 mod pattern;
 mod regex;
 mod regexset;
+pub mod skip_ranges;
 
 /// Escapes all regular expression meta characters in `pattern`.
 ///
