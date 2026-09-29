@@ -1366,6 +1366,7 @@ mod builders;
 pub mod bytes;
 mod error;
 mod find_byte;
+pub mod multi;
 #[cfg(feature = "pattern")]
 mod pattern;
 mod regex;

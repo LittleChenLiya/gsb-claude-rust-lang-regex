@@ -1,6 +1,16 @@
 1.13.2 (TBD)
 ============
-TODO
+
+New features:
+
+* A new `regex::multi` module provides a `MultiMatcher` that runs several
+uniquely identified rules against the same haystack and enumerates the
+match chosen by each rule at every legal start position, including matches
+that overlap. Results are ordered by start offset, end offset and rule
+declaration order. The module also includes `ChunkedHaystack` and
+`ChunkedSearch` helpers for feeding the haystack incrementally (even when
+chunks split a UTF-8 scalar) while producing the same results as a
+single-shot search.
 
 Bug fixes:
 

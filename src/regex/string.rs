@@ -1610,7 +1610,11 @@ impl<'h> Match<'h> {
 
     /// Creates a new match from the given haystack and byte offsets.
     #[inline]
-    fn new(haystack: &'h str, start: usize, end: usize) -> Match<'h> {
+    pub(crate) fn new(
+        haystack: &'h str,
+        start: usize,
+        end: usize,
+    ) -> Match<'h> {
         Match { haystack, start, end }
     }
 }

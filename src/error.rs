@@ -8,6 +8,9 @@ use regex_automata::meta;
 pub enum Error {
     /// A syntax error.
     Syntax(String),
+    /// An error that occurs when two rules in a multi-rule matcher share
+    /// the same unique identifier. The argument is the duplicated identifier.
+    DuplicateRuleId(String),
     /// The compiled program exceeded the set size
     /// limit. The argument is the size limit imposed by
     /// [`RegexBuilder::size_limit`](crate::RegexBuilder::size_limit). Even
@@ -61,6 +64,7 @@ impl std::error::Error for Error {
         match *self {
             Error::Syntax(ref err) => err,
             Error::CompiledTooBig(_) => "compiled program too big",
+            Error::DuplicateRuleId(_) => "duplicate multi rule identifier",
         }
     }
 }
@@ -72,6 +76,10 @@ impl core::fmt::Display for Error {
             Error::CompiledTooBig(limit) => write!(
                 f,
                 "Compiled regex exceeds size limit of {limit} bytes.",
+            ),
+            Error::DuplicateRuleId(ref id) => write!(
+                f,
+                "a multi matcher rule with identifier {id:?} already exists",
             ),
         }
     }
@@ -95,6 +103,9 @@ impl core::fmt::Debug for Error {
             }
             Error::CompiledTooBig(limit) => {
                 f.debug_tuple("CompiledTooBig").field(&limit).finish()
+            }
+            Error::DuplicateRuleId(ref id) => {
+                f.debug_tuple("DuplicateRuleId").field(id).finish()
             }
         }
     }

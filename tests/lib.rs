@@ -2,6 +2,7 @@
 
 mod fuzz;
 mod misc;
+mod multi;
 mod regression;
 mod regression_fuzz;
 mod replace;
