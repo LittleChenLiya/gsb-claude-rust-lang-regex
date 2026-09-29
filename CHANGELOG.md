@@ -2,6 +2,15 @@
 ============
 TODO
 
+New features:
+
+* `Regex::find_iter_excluding` (and `regex::bytes::Regex::find_iter_excluding`)
+returns an iterator over matches that avoid a caller-provided list of
+half-open UTF-8 byte ranges. The regex is still executed over the whole
+original haystack, so `^`, `$` and `\b` keep their original meaning, and
+reported offsets refer to the original haystack. The ranges are validated
+up front and overlapping ranges are merged.
+
 Bug fixes:
 
 * [#1333](https://github.com/rust-lang/regex/issues/1333):

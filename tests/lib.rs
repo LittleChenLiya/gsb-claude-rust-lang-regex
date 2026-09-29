@@ -1,5 +1,6 @@
 #![cfg_attr(feature = "pattern", feature(pattern))]
 
+mod exclude;
 mod fuzz;
 mod misc;
 mod regression;

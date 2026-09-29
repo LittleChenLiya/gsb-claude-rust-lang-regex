@@ -1359,12 +1359,14 @@ extern crate alloc;
 extern crate std;
 
 pub use crate::error::Error;
+pub use crate::exclude::ExclusionError;
 
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 
 mod builders;
 pub mod bytes;
 mod error;
+mod exclude;
 mod find_byte;
 #[cfg(feature = "pattern")]
 mod pattern;

@@ -1175,6 +1175,50 @@ impl Regex {
         self.meta.find(input).map(|m| Match::new(haystack, m.start(), m.end()))
     }
 
+    /// Returns an iterator over successive non-overlapping matches that do
+    /// not overlap any of the byte ranges in `excluded`.
+    ///
+    /// Each excluded range is a half-open byte range, `start..end`. The
+    /// ranges are validated up front and any overlapping ranges are merged;
+    /// see [`ExclusionError`](crate::ExclusionError) for the validation
+    /// rules. Unlike the `&str` API, ranges may split UTF-8 sequences.
+    ///
+    /// A non-empty match is reported only if none of its bytes are excluded,
+    /// and a zero-width match is reported only when its position is not
+    /// inside an excluded range. (The position shared by two merely
+    /// adjacent, non-overlapping ranges is considered visible.)
+    ///
+    /// Unlike splitting the haystack at the excluded ranges, the regex is
+    /// always executed over the whole original haystack. A match is reported
+    /// only when its entire byte range lies outside the excluded regions.
+    /// Because of this, the `^` and `$` anchors and the `\b` assertion see
+    /// the same surrounding context they would see in a normal search, and
+    /// the reported byte offsets refer to the original haystack.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// // A comment hides the "world" portion of the text.
+    /// let hay = b"hello /* world */ goodbye";
+    /// let re = Regex::new(r"(?-u)\b\w+\b").unwrap();
+    /// let spans: Vec<_> =
+    ///     re.find_iter_excluding(hay, &[6..17]).unwrap()
+    ///         .map(|m| m.range())
+    ///         .collect();
+    /// assert_eq!(spans, vec![0..5, 18..25]);
+    /// ```
+    #[inline]
+    pub fn find_iter_excluding<'r, 'h>(
+        &'r self,
+        haystack: &'h [u8],
+        excluded: &[core::ops::Range<usize>],
+    ) -> Result<ExcludingMatches<'r, 'h>, crate::ExclusionError> {
+        crate::exclude::Excluding::new(self, haystack, excluded)
+            .map(ExcludingMatches)
+    }
+
     /// Returns the same as [`Regex::captures`], but starts the search at the
     /// given offset.
     ///
@@ -2261,6 +2305,29 @@ impl<'r, 'h> Iterator for Matches<'r, 'h> {
 }
 
 impl<'r, 'h> core::iter::FusedIterator for Matches<'r, 'h> {}
+
+/// An iterator over non-overlapping matches that avoid excluded byte ranges.
+///
+/// This iterator is created by
+/// [`Regex::find_iter_excluding`](Regex::find_iter_excluding). It yields
+/// matches with the same semantics as [`Matches`], except that any match
+/// overlapping an excluded range is skipped.
+#[derive(Clone, Debug)]
+pub struct ExcludingMatches<'r, 'h>(
+    crate::exclude::Excluding<'r, 'h, Regex, [u8]>,
+);
+
+impl<'r, 'h> Iterator for ExcludingMatches<'r, 'h> {
+    type Item = Match<'h>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Match<'h>> {
+        let haystack = self.0.haystack();
+        self.0.next().map(|(start, end)| Match::new(haystack, start, end))
+    }
+}
+
+impl<'r, 'h> core::iter::FusedIterator for ExcludingMatches<'r, 'h> {}
 
 /// An iterator over all non-overlapping capture matches in a haystack.
 ///
