@@ -1360,12 +1360,16 @@ extern crate std;
 
 pub use crate::error::Error;
 
+pub use crate::multirule::{
+    MultiRule, MultiRuleMatch, MultiRuleMatches, MultiRuleReader,
+};
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 
 mod builders;
 pub mod bytes;
 mod error;
 mod find_byte;
+mod multirule;
 #[cfg(feature = "pattern")]
 mod pattern;
 mod regex;
