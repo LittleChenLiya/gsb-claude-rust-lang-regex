@@ -1368,6 +1368,7 @@ mod error;
 mod find_byte;
 #[cfg(feature = "pattern")]
 mod pattern;
+pub mod record;
 mod regex;
 mod regexset;
 
