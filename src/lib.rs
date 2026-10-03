@@ -80,6 +80,15 @@ There is also a [`RegexSet`], which permits searching for multiple regex
 patterns simultaneously in a single search. However, it currently only reports
 which patterns match and *not* the byte offsets of a match.
 
+For log-style classification where exactly one of several rules should win,
+there is a [`selector::Selector`]. Unlike a `RegexSet`, it reports the single
+rule whose match starts earliest in the haystack (ties go to the rule
+declared first), along with that rule's original captures. Each rule is an
+independently compiled regex, so rules are never merged into one big
+alternation and a rule such as `a|ab` keeps its own leftmost-first behavior.
+A byte-oriented [`selector::bytes::Selector`] is available for haystacks that
+are not valid UTF-8.
+
 Otherwise, this top-level crate documentation is organized as follows:
 
 * [Usage](#usage) shows how to add the `regex` crate to your Rust project.
@@ -1370,6 +1379,7 @@ mod find_byte;
 mod pattern;
 mod regex;
 mod regexset;
+pub mod selector;
 
 /// Escapes all regular expression meta characters in `pattern`.
 ///

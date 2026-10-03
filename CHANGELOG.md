@@ -2,6 +2,18 @@
 ============
 TODO
 
+New APIs:
+
+* A new `regex::selector::Selector` (and its byte-oriented twin
+`regex::selector::bytes::Selector`, also re-exported as `regex::bytes::Selector`)
+classifies a haystack by selecting exactly one of several independently
+compiled regex rules. The rule whose leftmost match starts at the earliest
+byte offset wins; ties go to the rule declared first; the winning rule's
+original captures are returned. Unlike combining the patterns into one big
+alternation, each rule keeps its own leftmost-first semantics (e.g. `a|ab`
+still prefers `a`), zero-width matches participate, and the byte variant
+preserves non-UTF-8 bytes.
+
 Bug fixes:
 
 * [#1333](https://github.com/rust-lang/regex/issues/1333):

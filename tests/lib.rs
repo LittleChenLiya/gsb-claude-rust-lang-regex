@@ -7,6 +7,7 @@ mod regression_fuzz;
 mod replace;
 #[cfg(feature = "pattern")]
 mod searcher;
+mod selector;
 mod suite_bytes;
 mod suite_bytes_set;
 mod suite_string;
