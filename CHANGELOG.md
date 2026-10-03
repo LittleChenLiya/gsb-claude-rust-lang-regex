@@ -2,6 +2,17 @@
 ============
 TODO
 
+New features:
+
+* Add `regex::bytes::Captures::snapshot`, which returns an explicitly owned
+`regex::bytes::CapturesSnapshot` of a match: the overall match bytes, the
+original haystack range and raw bytes of every capture group, and the capture
+group name index. The snapshot does not borrow the haystack, so reusable
+buffers may be recycled immediately. Snapshots can be serialized to a
+versioned archive (`CapturesSnapshot::to_archive`) and restored with
+validation (`CapturesSnapshot::from_archive`, errors are reported as
+`regex::bytes::SnapshotError`) without re-executing a regex.
+
 Bug fixes:
 
 * [#1333](https://github.com/rust-lang/regex/issues/1333):

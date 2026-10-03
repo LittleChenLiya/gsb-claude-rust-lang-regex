@@ -4,6 +4,10 @@ use regex_automata::{meta, util::captures, Input, PatternID};
 
 use crate::{bytes::RegexBuilder, error::Error};
 
+pub use self::snapshot::{CapturesSnapshot, SnapshotError};
+
+mod snapshot;
+
 /// A convenient way to construct regex patterns from string literals.
 ///
 /// This macro can be used to construct reusable instances of [`Regex`] with
@@ -1977,6 +1981,39 @@ impl<'h> Captures<'h> {
     #[inline]
     pub fn len(&self) -> usize {
         self.caps.group_len()
+    }
+
+    /// Returns an owned snapshot of these captures.
+    ///
+    /// This copies the overall match bytes, the original haystack range and
+    /// raw bytes of every capture group, and the capture group name index
+    /// into a [`CapturesSnapshot`]. The snapshot does not borrow the
+    /// haystack, so the haystack (for example, a reusable read buffer) may
+    /// be reused or dropped as soon as this method returns.
+    ///
+    /// This is an explicitly owned alternative to borrowing a `Captures`
+    /// value; the `Captures` API itself is unchanged.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"(?-u)(?<word>[a-z]\xFF[a-z])").unwrap();
+    /// let snap = {
+    ///     let haystack = b"\x00\x01a\xFFb".to_vec(); // 2-byte prefix
+    ///     let caps = re.captures(&haystack).unwrap();
+    ///     caps.snapshot()
+    /// }; // `haystack` and `caps` are dropped here.
+    ///
+    /// // The snapshot still reports the original ranges and raw bytes.
+    /// assert_eq!(snap.full_match_span(), 2..5);
+    /// assert_eq!(snap.span_by_name("word"), Some(2..5));
+    /// assert_eq!(snap.bytes_by_name("word"), Some(&b"a\xFFb"[..]));
+    /// ```
+    #[inline]
+    pub fn snapshot(&self) -> CapturesSnapshot {
+        CapturesSnapshot::new(self)
     }
 }
 
