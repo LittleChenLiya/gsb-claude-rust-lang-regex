@@ -1,7 +1,8 @@
-use alloc::{borrow::Cow, string::String, sync::Arc};
+use alloc::{borrow::Cow, string::String, sync::Arc, vec::Vec};
 
 use regex_automata::{meta, util::captures, Input, PatternID};
 
+use super::replacement;
 use crate::{error::Error, RegexBuilder};
 
 /// A convenient way to construct regex patterns from string literals.
@@ -1000,6 +1001,306 @@ impl Regex {
             let m = cap.get(0).unwrap();
             new.push_str(&haystack[last_match..m.start()]);
             rep.replace_append(&cap, &mut new);
+            last_match = m.end();
+            if limit > 0 && i >= limit - 1 {
+                break;
+            }
+        }
+        new.push_str(&haystack[last_match..]);
+        Cow::Owned(new)
+    }
+}
+
+/// A precompiled replacement template bound to a [`Regex`]'s capture group
+/// layout.
+///
+/// A `ReplacementPlan` is created by [`Regex::replacement_plan`] (or
+/// [`ReplacementPlan::new`]) from a replacement template. The template is
+/// parsed and validated once, at plan time: references to capture groups that
+/// do not exist in the regex are reported as errors before any replacement is
+/// performed. This is in contrast to the free-form [`Replacer`] trait, where
+/// references to non-existent groups are silently replaced with the empty
+/// string.
+///
+/// A plan is bound to the group layout of the regex it was compiled for. It
+/// can only be used to replace matches of that exact regex. Attempting to use
+/// a plan with a different regex—even one with the same number of capture
+/// groups—will result in an error. This binding is checked at execution time,
+/// so a plan can be safely stored and reused.
+///
+/// The template format is the same as the one documented on
+/// [`Regex::replace`]: `$name` and `$index` refer to capture groups,
+/// `${name}` and `${index}` provide braced variants, and `$$` writes a
+/// literal `$`. A capture group that is referenced but did not participate in
+/// a match is replaced with the empty string.
+///
+/// # Example
+///
+/// ```
+/// use regex::{Regex, ReplacementPlan};
+///
+/// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+/// let plan = re.replacement_plan("$name-$2").unwrap();
+/// assert_eq!(re.replace_with_plan("a", &plan).unwrap(), "a-");
+///
+/// // A template referencing a non-existent group fails at plan time:
+/// assert!(re.replacement_plan("$missing").is_err());
+/// ```
+#[derive(Clone, Debug)]
+pub struct ReplacementPlan {
+    /// The total number of capture groups in the regex (including group 0).
+    group_len: usize,
+    /// The name of each capture group, in order. `None` for unnamed groups.
+    group_names: Vec<Option<String>>,
+    /// The compiled replacement template.
+    chunks: Vec<PlanChunk>,
+}
+
+/// A single chunk of a compiled replacement template.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PlanChunk {
+    /// A literal string to emit verbatim.
+    Literal(String),
+    /// A reference to the capture group at the given index.
+    Group(usize),
+}
+
+impl ReplacementPlan {
+    /// Compiles a replacement template into a plan for the given regex.
+    ///
+    /// The template uses the same `$ref` syntax as [`Regex::replace`]:
+    /// `$name` and `$index` refer to capture groups, `${name}` and `${index}`
+    /// provide braced variants, and `$$` writes a literal `$`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the template references a capture group (by index
+    /// or name) that does not exist in `re`. This validation happens entirely
+    /// at plan time, before any replacement is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::{Regex, ReplacementPlan};
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = ReplacementPlan::new(&re, "$name-$2").unwrap();
+    /// assert_eq!(re.replace_with_plan("a", &plan).unwrap(), "a-");
+    /// ```
+    pub fn new(re: &Regex, template: &str) -> Result<ReplacementPlan, Error> {
+        let group_len = re.captures_len();
+        let group_names: Vec<Option<String>> =
+            re.capture_names().map(|n| n.map(String::from)).collect();
+        let chunks = replacement::compile(
+            template.as_bytes(),
+            group_len,
+            |name| group_names.iter().position(|n| n.as_deref() == Some(name)),
+        )?
+        .into_iter()
+        .map(|c| match c {
+            replacement::Chunk::Literal(b) => {
+                PlanChunk::Literal(String::from_utf8(b).expect(
+                    "replacement template is valid UTF-8, so all literal \
+                     chunks must be valid UTF-8",
+                ))
+            }
+            replacement::Chunk::Group(i) => PlanChunk::Group(i),
+        })
+        .collect();
+        Ok(ReplacementPlan { group_len, group_names, chunks })
+    }
+
+    /// Returns the total number of capture groups in the regex this plan was
+    /// compiled for (including the implicit group at index 0).
+    ///
+    /// This is equivalent to [`Regex::captures_len`] for the regex the plan
+    /// was compiled for.
+    pub fn captures_len(&self) -> usize {
+        self.group_len
+    }
+
+    /// Returns true if and only if this plan is bound to the given regex's
+    /// capture group layout.
+    ///
+    /// Two regexes have the same group layout when they have the same number
+    /// of capture groups and the same group names in the same order.
+    fn matches(&self, re: &Regex) -> bool {
+        if self.group_len != re.captures_len() {
+            return false;
+        }
+        for (i, name) in re.capture_names().enumerate() {
+            if self.group_names[i].as_deref() != name {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Appends the compiled replacement for the given capture to `dst`.
+    ///
+    /// Capture groups that did not participate in the match are replaced with
+    /// the empty string.
+    fn append_to(&self, caps: &Captures<'_>, dst: &mut String) {
+        for chunk in &self.chunks {
+            match chunk {
+                PlanChunk::Literal(lit) => dst.push_str(lit),
+                PlanChunk::Group(i) => {
+                    if let Some(m) = caps.get(*i) {
+                        dst.push_str(m.as_str());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replacement methods that use a precompiled [`ReplacementPlan`].
+///
+/// These methods are the plan-based equivalents of [`Regex::replace`],
+/// [`Regex::replace_all`] and [`Regex::replacen`]. They validate that the
+/// plan is bound to this regex's capture group layout before performing any
+/// replacement, so a plan can never be accidentally used with the wrong regex.
+impl Regex {
+    /// Compiles a replacement template into a [`ReplacementPlan`] for this
+    /// regex.
+    ///
+    /// This is a convenience method for [`ReplacementPlan::new`]. The plan is
+    /// validated at compile time: references to capture groups that do not
+    /// exist in this regex are reported as errors before any replacement is
+    /// performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = re.replacement_plan("$name-$2").unwrap();
+    /// assert_eq!(re.replace_with_plan("a", &plan).unwrap(), "a-");
+    ///
+    /// // A template referencing a non-existent group fails at plan time:
+    /// assert!(re.replacement_plan("$missing").is_err());
+    /// ```
+    pub fn replacement_plan(&self, template: &str) -> Result<ReplacementPlan, Error> {
+        ReplacementPlan::new(self, template)
+    }
+
+    /// Replaces the leftmost-first match in `haystack` with a precompiled
+    /// replacement plan.
+    ///
+    /// This is the plan-based equivalent of [`Regex::replace`]. The plan is
+    /// guaranteed to be bound to this regex's capture group layout; if it is
+    /// not, an error is returned and `haystack` is not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan was compiled for a regex with a different
+    /// capture group layout.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = re.replacement_plan("$name-$2").unwrap();
+    /// assert_eq!(re.replace_with_plan("a", &plan).unwrap(), "a-");
+    /// ```
+    pub fn replace_with_plan<'h>(
+        &self,
+        haystack: &'h str,
+        plan: &ReplacementPlan,
+    ) -> Result<Cow<'h, str>, Error> {
+        self.replacen_with_plan(haystack, 1, plan)
+    }
+
+    /// Replaces all non-overlapping matches in `haystack` with a precompiled
+    /// replacement plan.
+    ///
+    /// This is the plan-based equivalent of [`Regex::replace_all`]. The plan
+    /// is guaranteed to be bound to this regex's capture group layout; if it
+    /// is not, an error is returned and `haystack` is not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan was compiled for a regex with a different
+    /// capture group layout.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = re.replacement_plan("$name").unwrap();
+    /// assert_eq!(re.replace_all_with_plan("aba", &plan).unwrap(), "aa");
+    /// ```
+    pub fn replace_all_with_plan<'h>(
+        &self,
+        haystack: &'h str,
+        plan: &ReplacementPlan,
+    ) -> Result<Cow<'h, str>, Error> {
+        self.replacen_with_plan(haystack, 0, plan)
+    }
+
+    /// Replaces at most `limit` non-overlapping matches in `haystack` with a
+    /// precompiled replacement plan.
+    ///
+    /// This is the plan-based equivalent of [`Regex::replacen`]. The plan is
+    /// guaranteed to be bound to this regex's capture group layout; if it is
+    /// not, an error is returned and `haystack` is not modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the plan was compiled for a regex with a different
+    /// capture group layout.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = re.replacement_plan("$name").unwrap();
+    /// assert_eq!(re.replacen_with_plan("a ba", 1, &plan).unwrap(), "a ba");
+    /// ```
+    pub fn replacen_with_plan<'h>(
+        &self,
+        haystack: &'h str,
+        limit: usize,
+        plan: &ReplacementPlan,
+    ) -> Result<Cow<'h, str>, Error> {
+        if !plan.matches(self) {
+            return Err(Error::Replacement(String::from(
+                "replacement plan was compiled for a regex with a different \
+                 capture group layout",
+            )));
+        }
+        Ok(self.replacen_with_plan_unchecked(haystack, limit, plan))
+    }
+
+    /// The unchecked implementation of [`Regex::replacen_with_plan`].
+    ///
+    /// This reuses the same match iteration and zero-width advance rules as
+    /// [`Regex::replacen`], but emits the precompiled plan chunks instead of
+    /// going through the [`Replacer`] trait.
+    fn replacen_with_plan_unchecked<'h>(
+        &self,
+        haystack: &'h str,
+        limit: usize,
+        plan: &ReplacementPlan,
+    ) -> Cow<'h, str> {
+        let mut it = self.captures_iter(haystack).enumerate().peekable();
+        if it.peek().is_none() {
+            return Cow::Borrowed(haystack);
+        }
+        let mut new = String::with_capacity(haystack.len());
+        let mut last_match = 0;
+        for (i, cap) in it {
+            // unwrap on 0 is OK because captures only reports matches
+            let m = cap.get(0).unwrap();
+            new.push_str(&haystack[last_match..m.start()]);
+            plan.append_to(&cap, &mut new);
             last_match = m.end();
             if limit > 0 && i >= limit - 1 {
                 break;

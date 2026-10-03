@@ -29,6 +29,15 @@ pub enum Error {
     /// approaches may be appropriate. Instead, you'll have to determine just
     /// how big of a regex you want to allow.
     CompiledTooBig(usize),
+    /// An error that occurred while compiling a replacement template into a
+    /// [`ReplacementPlan`](crate::ReplacementPlan).
+    ///
+    /// This error is returned when a replacement template references a capture
+    /// group (by index or name) that does not exist in the regex the plan is
+    /// being compiled for. Because the plan is compiled before any replacement
+    /// is performed, this error is guaranteed to be reported before the input
+    /// haystack is modified.
+    Replacement(String),
 }
 
 impl Error {
@@ -61,6 +70,7 @@ impl std::error::Error for Error {
         match *self {
             Error::Syntax(ref err) => err,
             Error::CompiledTooBig(_) => "compiled program too big",
+            Error::Replacement(ref err) => err,
         }
     }
 }
@@ -73,6 +83,7 @@ impl core::fmt::Display for Error {
                 f,
                 "Compiled regex exceeds size limit of {limit} bytes.",
             ),
+            Error::Replacement(ref err) => err.fmt(f),
         }
     }
 }
@@ -95,6 +106,9 @@ impl core::fmt::Debug for Error {
             }
             Error::CompiledTooBig(limit) => {
                 f.debug_tuple("CompiledTooBig").field(&limit).finish()
+            }
+            Error::Replacement(ref err) => {
+                f.debug_tuple("Replacement").field(err).finish()
             }
         }
     }
