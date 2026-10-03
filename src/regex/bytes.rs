@@ -4,6 +4,10 @@ use regex_automata::{meta, util::captures, Input, PatternID};
 
 use crate::{bytes::RegexBuilder, error::Error};
 
+pub use super::bytes_owned::{
+    ArchiveError, OwnedCaptureMatches, OwnedCaptures, OwnedMatch, ARCHIVE_VERSION,
+};
+
 /// A convenient way to construct regex patterns from string literals.
 ///
 /// This macro can be used to construct reusable instances of [`Regex`] with
@@ -1684,7 +1688,7 @@ impl<'h> From<Match<'h>> for core::ops::Range<usize> {
 /// ```
 pub struct Captures<'h> {
     haystack: &'h [u8],
-    caps: captures::Captures,
+    pub(crate) caps: captures::Captures,
     static_captures_len: Option<usize>,
 }
 
