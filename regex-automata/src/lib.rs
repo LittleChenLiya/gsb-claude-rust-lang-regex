@@ -644,6 +644,8 @@ mod macros;
 pub mod dfa;
 #[cfg(feature = "hybrid")]
 pub mod hybrid;
+#[cfg(all(feature = "syntax", feature = "dfa-build"))]
+pub mod lexer;
 #[cfg(feature = "meta")]
 pub mod meta;
 #[cfg(feature = "nfa-thompson")]
