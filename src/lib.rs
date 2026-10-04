@@ -1359,6 +1359,7 @@ extern crate alloc;
 extern crate std;
 
 pub use crate::error::Error;
+pub use crate::error::WindowError;
 
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 

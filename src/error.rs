@@ -2,6 +2,50 @@ use alloc::string::{String, ToString};
 
 use regex_automata::meta;
 
+/// An error that occurred during a window search.
+///
+/// This error is returned when a window is invalid. A window is invalid when:
+///
+/// * `start > end`
+/// * `end > haystack.len()`
+/// * (string mode only) `start` or `end` is not at a UTF-8 boundary
+///
+/// # Examples
+///
+/// ```
+/// use regex::Regex;
+///
+/// let re = Regex::new(r"ab").unwrap();
+/// let hay = "a猫b";
+/// // Cutting into the middle of a UTF-8 byte is rejected.
+/// assert!(re.find_window(hay, 2..3).is_err());
+/// ```
+#[derive(Clone, PartialEq)]
+pub struct WindowError {
+    message: String,
+}
+
+impl WindowError {
+    pub(crate) fn new(message: impl Into<String>) -> WindowError {
+        WindowError { message: message.into() }
+    }
+}
+
+impl core::fmt::Display for WindowError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for WindowError {}
+
+impl core::fmt::Debug for WindowError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("WindowError").field(&self.message).finish()
+    }
+}
+
 /// An error that occurred during parsing or compiling a regular expression.
 #[non_exhaustive]
 #[derive(Clone, PartialEq)]

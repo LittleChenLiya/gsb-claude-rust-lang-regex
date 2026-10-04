@@ -1311,6 +1311,227 @@ impl Regex {
     ) -> Option<Match<'h>> {
         self.captures_read_at(locs, haystack, start)
     }
+
+    /// Returns the first match of this regex within the given byte window,
+    /// or `None` if no match exists.
+    ///
+    /// The window is a half-open byte range `[start, end)` that restricts the
+    /// search to matches whose full extent lies within the window. The
+    /// haystack outside the window is still used as context for anchors, word
+    /// boundaries and look-around assertions, but is never part of a match.
+    /// All returned offsets are absolute offsets into the original haystack,
+    /// not relative to the window.
+    ///
+    /// The window must be a valid byte range. If the window is invalid, an
+    /// error is returned before any search is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"ab").unwrap();
+    /// let hay = b"xab";
+    /// // The match is reported at its absolute offset in the haystack.
+    /// assert_eq!(re.find_window(hay, 1..3).unwrap().map(|m| m.range()), Some(1..3));
+    /// // A '^' anchor cannot match inside the window because it sees the
+    /// // full haystack as context.
+    /// let re = Regex::new(r"^ab").unwrap();
+    /// assert_eq!(re.find_window(hay, 1..3).unwrap(), None);
+    /// ```
+    #[inline]
+    pub fn find_window<'h>(
+        &self,
+        haystack: &'h [u8],
+        window: core::ops::Range<usize>,
+    ) -> Result<Option<Match<'h>>, crate::error::WindowError> {
+        validate_window(haystack, &window)?;
+        let input = Input::new(haystack).span(window);
+        Ok(self
+            .meta
+            .search(&input)
+            .map(|m| Match::new(haystack, m.start(), m.end())))
+    }
+
+    /// Returns true if and only if there is a match for this regex within the
+    /// given byte window.
+    ///
+    /// The window is a half-open byte range `[start, end)` that restricts the
+    /// search to matches whose full extent lies within the window. The
+    /// haystack outside the window is still used as context for anchors, word
+    /// boundaries and look-around assertions.
+    ///
+    /// The window must be a valid byte range. If the window is invalid, an
+    /// error is returned before any search is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"\bfoo\b").unwrap();
+    /// let hay = b"xfoo bar";
+    /// // The word boundary at the window edge is resolved using the full
+    /// // haystack, so 'foo' is not considered a word here.
+    /// assert!(!re.is_match_window(hay, 1..5).unwrap());
+    /// ```
+    #[inline]
+    pub fn is_match_window(
+        &self,
+        haystack: &[u8],
+        window: core::ops::Range<usize>,
+    ) -> Result<bool, crate::error::WindowError> {
+        validate_window(haystack, &window)?;
+        let input = Input::new(haystack).span(window).earliest(true);
+        Ok(self.meta.search_half(&input).is_some())
+    }
+
+    /// Returns the first match of this regex within the given byte window,
+    /// along with the spans of all capturing groups that participated in the
+    /// match, or `None` if no match exists.
+    ///
+    /// The window is a half-open byte range `[start, end)` that restricts the
+    /// search to matches whose full extent lies within the window. The
+    /// haystack outside the window is still used as context for anchors, word
+    /// boundaries and look-around assertions, but is never part of a match.
+    /// All returned offsets are absolute offsets into the original haystack,
+    /// not relative to the window.
+    ///
+    /// The window must be a valid byte range. If the window is invalid, an
+    /// error is returned before any search is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"(?<word>\w+)").unwrap();
+    /// let hay = b"foo bar baz";
+    /// let caps = re.captures_window(hay, 4..7).unwrap().unwrap();
+    /// // The match and capture offsets are absolute offsets into the
+    /// // original haystack.
+    /// assert_eq!(caps.get(0).unwrap().range(), 4..7);
+    /// assert_eq!(caps.name("word").unwrap().range(), 4..7);
+    /// ```
+    #[inline]
+    pub fn captures_window<'h>(
+        &self,
+        haystack: &'h [u8],
+        window: core::ops::Range<usize>,
+    ) -> Result<Option<Captures<'h>>, crate::error::WindowError> {
+        validate_window(haystack, &window)?;
+        let input = Input::new(haystack).span(window);
+        let mut caps = self.meta.create_captures();
+        self.meta.search_captures(&input, &mut caps);
+        if caps.is_match() {
+            let static_captures_len = self.static_captures_len();
+            Ok(Some(Captures { haystack, caps, static_captures_len }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Returns an iterator over all non-overlapping matches within the given
+    /// byte window.
+    ///
+    /// The window is a half-open byte range `[start, end)` that restricts the
+    /// search to matches whose full extent lies within the window. The
+    /// haystack outside the window is still used as context for anchors, word
+    /// boundaries and look-around assertions, but is never part of a match.
+    /// All returned offsets are absolute offsets into the original haystack,
+    /// not relative to the window.
+    ///
+    /// Empty matches are advanced according to the same rules as
+    /// [`Regex::find_iter`].
+    ///
+    /// The window must be a valid byte range. If the window is invalid, an
+    /// error is returned before any search is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"a").unwrap();
+    /// let hay = b"ababa";
+    /// let matches: Vec<_> = re
+    ///     .find_iter_window(hay, 1..5)
+    ///     .unwrap()
+    ///     .map(|m| m.range())
+    ///     .collect();
+    /// assert_eq!(matches, vec![1..2, 3..4]);
+    /// ```
+    #[inline]
+    pub fn find_iter_window<'r, 'h>(
+        &'r self,
+        haystack: &'h [u8],
+        window: core::ops::Range<usize>,
+    ) -> Result<Matches<'r, 'h>, crate::error::WindowError> {
+        validate_window(haystack, &window)?;
+        let input = Input::new(haystack).span(window);
+        Ok(Matches { haystack, it: self.meta.find_iter(input) })
+    }
+
+    /// Returns an iterator over all non-overlapping matches within the given
+    /// byte window, along with the spans of all capturing groups that
+    /// participated in each match.
+    ///
+    /// The window is a half-open byte range `[start, end)` that restricts the
+    /// search to matches whose full extent lies within the window. The
+    /// haystack outside the window is still used as context for anchors, word
+    /// boundaries and look-around assertions, but is never part of a match.
+    /// All returned offsets are absolute offsets into the original haystack,
+    /// not relative to the window.
+    ///
+    /// Empty matches are advanced according to the same rules as
+    /// [`Regex::captures_iter`].
+    ///
+    /// The window must be a valid byte range. If the window is invalid, an
+    /// error is returned before any search is performed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"(?<word>\w)").unwrap();
+    /// let hay = b"abab";
+    /// let matches: Vec<_> = re
+    ///     .captures_iter_window(hay, 1..4)
+    ///     .unwrap()
+    ///     .map(|caps| caps.get(0).unwrap().range())
+    ///     .collect();
+    /// // \w matches every word character in the window.
+    /// assert_eq!(matches, vec![1..2, 2..3, 3..4]);
+    /// ```
+    #[inline]
+    pub fn captures_iter_window<'r, 'h>(
+        &'r self,
+        haystack: &'h [u8],
+        window: core::ops::Range<usize>,
+    ) -> Result<CaptureMatches<'r, 'h>, crate::error::WindowError> {
+        validate_window(haystack, &window)?;
+        let input = Input::new(haystack).span(window);
+        Ok(CaptureMatches { haystack, it: self.meta.captures_iter(input) })
+    }
+}
+
+/// Validate that a window is a valid byte range within the haystack.
+fn validate_window(
+    haystack: &[u8],
+    window: &core::ops::Range<usize>,
+) -> Result<(), crate::error::WindowError> {
+    if window.start > window.end {
+        return Err(crate::error::WindowError::new(
+            "invalid window range: start > end",
+        ));
+    }
+    if window.end > haystack.len() {
+        return Err(crate::error::WindowError::new(
+            "window is out of bounds",
+        ));
+    }
+    Ok(())
 }
 
 /// Auxiliary methods.

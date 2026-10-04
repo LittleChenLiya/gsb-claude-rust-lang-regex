@@ -159,3 +159,162 @@ fn re_bytes_macro() {
 
     fn ensure_static(_re: &'static bytes::Regex) {}
 }
+
+#[test]
+fn window_find_basic() {
+    let re = Regex::new(r"ab").unwrap();
+    let hay = "xab";
+    // The match is reported at its absolute offset in the haystack.
+    assert_eq!(
+        re.find_window(hay, 1..3).unwrap().map(|m| m.range()),
+        Some(1..3)
+    );
+    // No match outside the window.
+    assert_eq!(re.find_window(hay, 0..1).unwrap(), None);
+}
+
+#[test]
+fn window_find_anchor() {
+    let re = Regex::new(r"^ab").unwrap();
+    let hay = "xab";
+    // A '^' anchor cannot match inside the window because it sees the full
+    // haystack as context.
+    assert_eq!(re.find_window(hay, 1..3).unwrap(), None);
+    // But it can match at the start of the haystack.
+    assert_eq!(
+        re.find_window(hay, 0..2).unwrap().map(|m| m.range()),
+        Some(0..2)
+    );
+}
+
+#[test]
+fn window_find_word_boundary() {
+    let re = Regex::new(r"\bchew\b").unwrap();
+    let hay = "eschew";
+    // The word boundary at the window edge is resolved using the full
+    // haystack, so 'chew' is not considered a word here.
+    assert_eq!(re.find_window(hay, 2..6).unwrap(), None);
+
+    let re = Regex::new(r"\bfoo\b").unwrap();
+    let hay = "xfoo bar";
+    assert!(!re.is_match_window(hay, 1..5).unwrap());
+}
+
+#[test]
+fn window_find_utf8_boundary() {
+    let re = Regex::new(r"ab").unwrap();
+    let hay = "a猫b";
+    // Cutting into the middle of a UTF-8 byte is rejected.
+    assert!(re.find_window(hay, 2..3).is_err());
+    // Both bounds must be on UTF-8 character boundaries.
+    assert!(re.find_window(hay, 1..4).is_ok());
+    assert!(re.find_window(hay, 1..4).unwrap().is_none());
+}
+
+#[test]
+fn window_find_out_of_bounds() {
+    let re = Regex::new(r"ab").unwrap();
+    let hay = "xab";
+    // end > haystack.len() is out of bounds.
+    assert!(re.find_window(hay, 1..4).is_err());
+    // start > end is invalid.
+    assert!(re.find_window(hay, 3..1).is_err());
+}
+
+#[test]
+fn window_captures_absolute_offsets() {
+    let re = Regex::new(r"(?<word>\w+)").unwrap();
+    let hay = "foo bar baz";
+    let caps = re.captures_window(hay, 4..7).unwrap().unwrap();
+    // The match and capture offsets are absolute offsets into the original
+    // haystack.
+    assert_eq!(caps.get(0).unwrap().range(), 4..7);
+    assert_eq!(caps.name("word").unwrap().range(), 4..7);
+    assert_eq!(&caps["word"], "bar");
+}
+
+#[test]
+fn window_find_iter() {
+    let re = Regex::new(r"a").unwrap();
+    let hay = "ababa";
+    let matches: Vec<_> = re
+        .find_iter_window(hay, 1..5)
+        .unwrap()
+        .map(|m| m.range())
+        .collect();
+    assert_eq!(matches, vec![1..2, 3..4]);
+}
+
+#[test]
+fn window_find_iter_empty_matches() {
+    let re = Regex::new(r"a|").unwrap();
+    let hay = "abba";
+    let matches: Vec<_> = re
+        .find_iter_window(hay, 0..4)
+        .unwrap()
+        .map(|m| m.range())
+        .collect();
+    // Empty matches are advanced according to the existing iteration rules.
+    assert_eq!(matches, vec![0..1, 2..2, 3..4]);
+}
+
+#[test]
+fn window_captures_iter() {
+    let re = Regex::new(r"(?<word>\w)").unwrap();
+    let hay = "abab";
+    let matches: Vec<_> = re
+        .captures_iter_window(hay, 1..4)
+        .unwrap()
+        .map(|caps| caps.get(0).unwrap().range())
+        .collect();
+    // \w matches every word character in the window.
+    assert_eq!(matches, vec![1..2, 2..3, 3..4]);
+}
+
+#[test]
+fn window_bytes_basic() {
+    let re = bytes::Regex::new(r"ab").unwrap();
+    let hay = b"xab";
+    assert_eq!(
+        re.find_window(hay, 1..3).unwrap().map(|m| m.range()),
+        Some(1..3)
+    );
+}
+
+#[test]
+fn window_bytes_invalid_utf8() {
+    let re = bytes::Regex::new(r"ab").unwrap();
+    let hay = b"a\xffb";
+    // Bytes mode does not require UTF-8 boundaries.
+    assert!(re.find_window(hay, 1..3).is_ok());
+}
+
+#[test]
+fn window_bytes_captures() {
+    let re = bytes::Regex::new(r"(?<word>\w+)").unwrap();
+    let hay = b"foo bar baz";
+    let caps = re.captures_window(hay, 4..7).unwrap().unwrap();
+    assert_eq!(caps.get(0).unwrap().range(), 4..7);
+    assert_eq!(caps.name("word").unwrap().range(), 4..7);
+}
+
+#[test]
+fn window_bytes_find_iter() {
+    let re = bytes::Regex::new(r"a").unwrap();
+    let hay = b"ababa";
+    let matches: Vec<_> = re
+        .find_iter_window(hay, 1..5)
+        .unwrap()
+        .map(|m| m.range())
+        .collect();
+    assert_eq!(matches, vec![1..2, 3..4]);
+}
+
+#[test]
+fn window_error_display() {
+    let re = Regex::new(r"ab").unwrap();
+    let hay = "a猫b";
+    let err = re.find_window(hay, 2..3).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("UTF-8"), "error message: {msg:?}");
+}
