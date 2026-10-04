@@ -1,8 +1,12 @@
-use alloc::{borrow::Cow, string::String, sync::Arc};
+use alloc::{borrow::Cow, boxed::Box, string::String, sync::Arc, vec::Vec};
 
 use regex_automata::{meta, util::captures, Input, PatternID};
 
-use crate::{error::Error, RegexBuilder};
+use crate::{
+    error::Error,
+    plan::{self, ReplacementPlanError, ReplacementPlanErrorKind},
+    RegexBuilder,
+};
 
 /// A convenient way to construct regex patterns from string literals.
 ///
@@ -2670,5 +2674,278 @@ fn no_expansion<T: AsRef<str>>(replacement: &T) -> Option<Cow<'_, str>> {
     match crate::find_byte::find_byte(b'$', replacement.as_bytes()) {
         Some(_) => None,
         None => Some(Cow::Borrowed(replacement)),
+    }
+}
+
+/// A precompiled replacement template bound to the capture group layout of
+/// a particular [`Regex`].
+///
+/// A `ReplacementPlan` parses a replacement template once, up front, using
+/// exactly the same syntax as [`Regex::replace`] and [`Captures::expand`]
+/// (`$1`, `$name`, `${name}` and `$$` for a literal `$`). Unlike ad-hoc
+/// replacement strings, every capture group reference is resolved when the
+/// plan is prepared: referencing a group that doesn't exist in the regex is
+/// an error at preparation time, before any replacement happens. A group
+/// that exists but doesn't participate in a particular match is replaced
+/// with the empty string, as usual.
+///
+/// A plan is bound to the capture group layout (the number of groups and
+/// their names) of the regex it was prepared with. Applying it to a
+/// different regex is only allowed when that regex has exactly the same
+/// layout; two regexes that merely have the same number of groups but
+/// different group names cannot share a plan. The layout check happens
+/// before any replacement is written, so a bad plan can never produce a
+/// half-replaced haystack.
+///
+/// Preparing a plan never mutates the regex, and applying a plan only
+/// reads from the regex and the haystack.
+///
+/// # Example: preparing a plan
+///
+/// ```
+/// use regex::Regex;
+///
+/// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+/// let plan = re.replacement_plan("$name-$2").unwrap();
+/// // Group 2 didn't participate in this match, so it becomes empty.
+/// assert_eq!(plan.replace_all(&re, "a").unwrap(), "a-");
+/// ```
+///
+/// # Example: preparation failure
+///
+/// Referencing a group that doesn't exist fails while the plan is being
+/// prepared, not halfway through a replacement:
+///
+/// ```
+/// use regex::{Regex, ReplacementPlanErrorKind};
+///
+/// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+/// let err = re.replacement_plan("$missing").unwrap_err();
+/// assert_eq!(
+///     err.kind(),
+///     &ReplacementPlanErrorKind::UnknownGroup {
+///         reference: "missing".to_string(),
+///     },
+/// );
+/// ```
+///
+/// # Example: plans are bound to one group layout
+///
+/// ```
+/// use regex::{Regex, ReplacementPlanErrorKind};
+///
+/// let re1 = Regex::new(r"(?P<name>a)(b)?").unwrap();
+/// let re2 = Regex::new(r"(?P<other>a)(b)?").unwrap();
+/// let plan = re1.replacement_plan("$name-$2").unwrap();
+/// // Same group count, but different group names: rejected.
+/// let err = plan.replace_all(&re2, "ab").unwrap_err();
+/// assert_eq!(err.kind(), &ReplacementPlanErrorKind::LayoutMismatch);
+/// // A regex with the same layout may share the plan.
+/// let re3 = Regex::new(r"(?P<name>a)(b)?").unwrap();
+/// assert_eq!(plan.replace_all(&re3, "ab").unwrap(), "a-b");
+/// ```
+#[derive(Clone, Debug)]
+pub struct ReplacementPlan {
+    segments: Vec<StrSegment>,
+    /// The group names (indexed by group number, group 0 is always `None`)
+    /// of the regex this plan was prepared with.
+    layout: Vec<Option<Box<str>>>,
+}
+
+/// A resolved segment of a string replacement plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StrSegment {
+    Lit(String),
+    Group(usize),
+}
+
+impl Regex {
+    /// Prepares a [`ReplacementPlan`] from the given replacement template.
+    ///
+    /// This is a convenience wrapper for [`ReplacementPlan::new`]. See its
+    /// documentation for more details and examples.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the template references a capture group (by name
+    /// or by index) that doesn't exist in this regex.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<name>a)(b)?").unwrap();
+    /// let plan = re.replacement_plan("$name-$2").unwrap();
+    /// assert_eq!(plan.replace_all(&re, "a").unwrap(), "a-");
+    /// assert!(re.replacement_plan("$missing").is_err());
+    /// ```
+    #[inline]
+    pub fn replacement_plan(
+        &self,
+        template: &str,
+    ) -> Result<ReplacementPlan, ReplacementPlanError> {
+        ReplacementPlan::new(self, template)
+    }
+}
+
+impl ReplacementPlan {
+    /// Prepares a replacement plan from the given template, bound to the
+    /// capture group layout of `re`.
+    ///
+    /// The template uses the same syntax as [`Regex::replace`]: `$name` or
+    /// `${name}` for a named group, `$1` or `${1}` for a numbered group and
+    /// `$$` for a literal `$`. Every reference is resolved against `re`
+    /// immediately; a reference to a group that doesn't exist is an error
+    /// here, at preparation time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the template references a capture group (by name
+    /// or by index) that doesn't exist in `re`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::{Regex, ReplacementPlan};
+    ///
+    /// let re = Regex::new(r"(\d{4})-(\d{2})").unwrap();
+    /// let plan = ReplacementPlan::new(&re, "$2/$1").unwrap();
+    /// assert_eq!(plan.replace_all(&re, "2026-10").unwrap(), "10/2026");
+    /// ```
+    #[inline]
+    pub fn new(
+        re: &Regex,
+        template: &str,
+    ) -> Result<ReplacementPlan, ReplacementPlanError> {
+        let names: Vec<Option<&str>> = re.capture_names().collect();
+        let raw = plan::parse(template.as_bytes());
+        let segments = plan::resolve(raw, &names)?
+            .into_iter()
+            .map(|seg| match seg {
+                plan::Segment::Lit(lit) => {
+                    // The template is a &str and every literal is a slice
+                    // of it (plus '$' bytes), so it's always valid UTF-8.
+                    let lit = String::from_utf8(lit)
+                        .expect("literal from &str template is valid UTF-8");
+                    StrSegment::Lit(lit)
+                }
+                plan::Segment::Group(index) => StrSegment::Group(index),
+            })
+            .collect();
+        let layout = names.iter().map(|n| n.map(Box::from)).collect();
+        Ok(ReplacementPlan { segments, layout })
+    }
+
+    /// Replaces the leftmost-first match in `haystack` using this plan.
+    ///
+    /// This follows the same matching semantics as [`Regex::replace`],
+    /// including the rules for advancing past empty matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, before anything is replaced, if `re` has a
+    /// different capture group layout than the regex this plan was prepared
+    /// with.
+    #[inline]
+    pub fn replace<'h>(
+        &self,
+        re: &Regex,
+        haystack: &'h str,
+    ) -> Result<Cow<'h, str>, ReplacementPlanError> {
+        self.replacen(re, haystack, 1)
+    }
+
+    /// Replaces all non-overlapping matches in `haystack` using this plan.
+    ///
+    /// This follows the same matching semantics as [`Regex::replace_all`],
+    /// including the rules for advancing past empty matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, before anything is replaced, if `re` has a
+    /// different capture group layout than the regex this plan was prepared
+    /// with.
+    #[inline]
+    pub fn replace_all<'h>(
+        &self,
+        re: &Regex,
+        haystack: &'h str,
+    ) -> Result<Cow<'h, str>, ReplacementPlanError> {
+        self.replacen(re, haystack, 0)
+    }
+
+    /// Replaces at most `limit` non-overlapping matches in `haystack` using
+    /// this plan. If `limit` is `0`, all matches are replaced.
+    ///
+    /// This follows the same matching semantics as [`Regex::replacen`],
+    /// including the rules for advancing past empty matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, before anything is replaced, if `re` has a
+    /// different capture group layout than the regex this plan was prepared
+    /// with.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"(?P<word>\w+)").unwrap();
+    /// let plan = re.replacement_plan("<$word>").unwrap();
+    /// assert_eq!(
+    ///     plan.replacen(&re, "one two three", 2).unwrap(),
+    ///     "<one> <two> three",
+    /// );
+    /// ```
+    #[inline]
+    pub fn replacen<'h>(
+        &self,
+        re: &Regex,
+        haystack: &'h str,
+        limit: usize,
+    ) -> Result<Cow<'h, str>, ReplacementPlanError> {
+        // The layout check happens before any replacement is written, so a
+        // plan applied to an incompatible regex can never fail halfway.
+        self.check_layout(re)?;
+        Ok(re.replacen(haystack, limit, self))
+    }
+
+    /// Returns an error if `re` doesn't have exactly the capture group
+    /// layout this plan was prepared with.
+    fn check_layout(&self, re: &Regex) -> Result<(), ReplacementPlanError> {
+        let same = self.layout.len() == re.captures_len()
+            && self.layout.iter().map(|n| n.as_deref()).eq(re.capture_names());
+        if same {
+            Ok(())
+        } else {
+            Err(ReplacementPlanErrorKind::LayoutMismatch.into())
+        }
+    }
+}
+
+impl<'r> Replacer for &'r ReplacementPlan {
+    fn replace_append(&mut self, caps: &Captures<'_>, dst: &mut String) {
+        for seg in self.segments.iter() {
+            match *seg {
+                StrSegment::Lit(ref lit) => dst.push_str(lit),
+                StrSegment::Group(index) => {
+                    // A group that didn't participate in the match expands
+                    // to the empty string.
+                    if let Some(m) = caps.get(index) {
+                        dst.push_str(m.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    fn no_expansion(&mut self) -> Option<Cow<'_, str>> {
+        match self.segments.as_slice() {
+            [] => Some(Cow::Borrowed("")),
+            [StrSegment::Lit(ref lit)] => Some(Cow::Borrowed(lit.as_str())),
+            _ => None,
+        }
     }
 }

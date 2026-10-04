@@ -2,6 +2,16 @@
 ============
 TODO
 
+New features:
+
+* Add `ReplacementPlan` (and `regex::bytes::ReplacementPlan`): a precompiled
+replacement template bound to the capture group layout of a `Regex`. Unknown
+capture group references are reported when the plan is prepared (via
+`Regex::replacement_plan` or `ReplacementPlan::new`) instead of being silently
+replaced with the empty string, and a plan can only be applied to a regex with
+the exact same group layout. Errors are reported via the new
+`ReplacementPlanError` and `ReplacementPlanErrorKind` types.
+
 Bug fixes:
 
 * [#1333](https://github.com/rust-lang/regex/issues/1333):

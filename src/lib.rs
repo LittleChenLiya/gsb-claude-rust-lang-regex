@@ -1359,6 +1359,7 @@ extern crate alloc;
 extern crate std;
 
 pub use crate::error::Error;
+pub use crate::plan::{ReplacementPlanError, ReplacementPlanErrorKind};
 
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 
@@ -1368,6 +1369,7 @@ mod error;
 mod find_byte;
 #[cfg(feature = "pattern")]
 mod pattern;
+mod plan;
 mod regex;
 mod regexset;
 
