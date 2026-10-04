@@ -427,6 +427,48 @@ assert!(!matches.matched(5));
 assert!(matches.matched(6));
 ```
 
+### Example: search within a byte window
+
+Sometimes one has a byte range of a haystack in which a match should be
+reported, but still wants the regex engine to "see" the rest of the
+haystack. Slicing the haystack (e.g., `&hay[start..end]`) accomplishes the
+former, but it also re-bases every offset to `0` and makes the bytes
+outside the slice invisible to anchors and word boundaries. The
+window-search entry points ([`Regex::find_in`], [`Regex::captures_in`] and
+friends, plus their [`bytes`] counterparts) instead limit only where the
+*complete* match may appear:
+
+```rust
+use regex::Regex;
+
+let hay = "xab";
+
+// `^ab` does not match because `^` anchors to the start of the whole
+// haystack, not to the start of the window.
+let re = Regex::new("^ab").unwrap();
+assert_eq!(None, re.find_in(hay, 1..3).unwrap());
+
+// A search for `ab` matches and its range is reported with the original
+// absolute byte offsets.
+let re = Regex::new("ab").unwrap();
+assert_eq!(1..3, re.find_in(hay, 1..3).unwrap().unwrap().range());
+```
+
+For `&str` haystacks, both window bounds must fall on UTF-8 code point
+boundaries. A range that splits the encoding of a character is rejected
+with [`WindowError`] before the search runs:
+
+```rust
+use regex::{Regex, WindowError};
+
+let hay = "a猫b"; // a=0, 猫=1..4, b=4
+let re = Regex::new(".").unwrap();
+assert_eq!(
+    Err(WindowError::NotCharBoundary { offset: 2 }),
+    re.find_in(hay, 2..4),
+);
+```
+
 # Performance
 
 This section briefly discusses a few concerns regarding the speed and resource
@@ -1359,6 +1401,7 @@ extern crate alloc;
 extern crate std;
 
 pub use crate::error::Error;
+pub use crate::window::WindowError;
 
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 
@@ -1370,6 +1413,7 @@ mod find_byte;
 mod pattern;
 mod regex;
 mod regexset;
+mod window;
 
 /// Escapes all regular expression meta characters in `pattern`.
 ///

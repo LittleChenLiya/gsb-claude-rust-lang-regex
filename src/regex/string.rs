@@ -1,8 +1,9 @@
 use alloc::{borrow::Cow, string::String, sync::Arc};
+use core::ops::RangeBounds;
 
 use regex_automata::{meta, util::captures, Input, PatternID};
 
-use crate::{error::Error, RegexBuilder};
+use crate::{error::Error, window, RegexBuilder, WindowError};
 
 /// A convenient way to construct regex patterns from string literals.
 ///
@@ -1305,6 +1306,285 @@ impl Regex {
         start: usize,
     ) -> Option<Match<'h>> {
         self.captures_read_at(locs, haystack, start)
+    }
+
+    /// Returns the same as [`Regex::is_match`], but the complete match must
+    /// lie within the given byte `window` of the haystack.
+    ///
+    /// Searching a window is *not* the same as searching a slice of the
+    /// haystack. The window only restricts where the complete match may be
+    /// reported; the rest of the haystack remains visible to the regex
+    /// engine. Consequently:
+    ///
+    /// * Anchors such as `^`, `$` and `(?m:^)` are resolved against the
+    ///   *whole* haystack. For example, `^` only matches at offset `0`, even
+    ///   when the window begins later.
+    /// * Word boundary assertions (`\b`) at the window edges use the bytes
+    ///   immediately outside the window as context.
+    /// * Empty matches advance according to the same iteration rules used
+    ///   elsewhere in this crate.
+    ///
+    /// All match and capture offsets are absolute byte offsets into the
+    /// original `haystack`.
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "xab";
+    /// // `^ab` cannot match: `^` anchors to the start of the whole haystack,
+    /// // even though the window begins at `ab`.
+    /// let re = Regex::new("^ab").unwrap();
+    /// assert!(!re.is_match_in(hay, 1..3).unwrap());
+    /// // A plain search within the window finds `ab`.
+    /// let re = Regex::new("ab").unwrap();
+    /// assert!(re.is_match_in(hay, 1..3).unwrap());
+    /// ```
+    #[inline]
+    pub fn is_match_in<R: RangeBounds<usize>>(
+        &self,
+        haystack: &str,
+        window: R,
+    ) -> Result<bool, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        Ok(self.meta.is_match(input))
+    }
+
+    /// Returns the same as [`Regex::find`], but the complete match must lie
+    /// within the given byte `window` of the haystack.
+    ///
+    /// Searching a window is *not* the same as searching a slice of the
+    /// haystack. The window only restricts where the complete match may be
+    /// reported; the rest of the haystack remains visible to the regex
+    /// engine. Consequently:
+    ///
+    /// * Anchors such as `^`, `$` and `(?m:^)` are resolved against the
+    ///   *whole* haystack. For example, `^` only matches at offset `0`, even
+    ///   when the window begins later.
+    /// * Word boundary assertions (`\b`) at the window edges use the bytes
+    ///   immediately outside the window as context.
+    /// * Empty matches advance according to the same iteration rules used
+    ///   elsewhere in this crate.
+    ///
+    /// All match offsets are absolute byte offsets into the original
+    /// `haystack`.
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "xab";
+    /// // `^ab` cannot match because `^` anchors at the start of the whole
+    /// // haystack, not at the start of the window.
+    /// let re = Regex::new("^ab").unwrap();
+    /// assert_eq!(None, re.find_in(hay, 1..3).unwrap());
+    /// // Searching for `ab` within the window reports its original offsets.
+    /// let re = Regex::new("ab").unwrap();
+    /// let m = re.find_in(hay, 1..3).unwrap().unwrap();
+    /// assert_eq!(1..3, m.range());
+    /// assert_eq!("ab", m.as_str());
+    ///
+    /// // A window that splits a code point is rejected.
+    /// let hay = "a猫b"; // bytes: a=0, 猫=1..4, b=4
+    /// assert!(re.find_in(hay, 2..5).is_err());
+    /// ```
+    #[inline]
+    pub fn find_in<'h, R: RangeBounds<usize>>(
+        &self,
+        haystack: &'h str,
+        window: R,
+    ) -> Result<Option<Match<'h>>, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        Ok(self
+            .meta
+            .find(input)
+            .map(|m| Match::new(haystack, m.start(), m.end())))
+    }
+
+    /// Returns the same as [`Regex::find_iter`], but every match yielded
+    /// must lie within the given byte `window` of the haystack.
+    ///
+    /// The window only restricts where complete matches are reported; the
+    /// bytes outside the window remain visible to anchors, look-around and
+    /// word boundary assertions. Every match yielded carries absolute byte
+    /// offsets into the original `haystack`. Empty matches follow the same
+    /// non-overlapping iteration rules as [`Regex::find_iter`].
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "ababa";
+    /// let re = Regex::new("a").unwrap();
+    /// let ranges: Vec<_> =
+    ///     re.find_iter_in(hay, 1..4).unwrap().map(|m| m.range()).collect();
+    /// // Only the `a` at byte offset 2 is inside [1, 4).
+    /// assert_eq!(ranges, vec![2..3]);
+    ///
+    /// // Empty matches at every position inside the window, including the
+    /// // end, follow the standard empty-match iteration rules.
+    /// let re = Regex::new("").unwrap();
+    /// let ranges: Vec<_> =
+    ///     re.find_iter_in(hay, 1..3).unwrap().map(|m| m.range()).collect();
+    /// assert_eq!(ranges, vec![1..1, 2..2, 3..3]);
+    /// ```
+    #[inline]
+    pub fn find_iter_in<'r, 'h, R: RangeBounds<usize>>(
+        &'r self,
+        haystack: &'h str,
+        window: R,
+    ) -> Result<Matches<'r, 'h>, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        Ok(Matches { haystack, it: self.meta.find_iter(input) })
+    }
+
+    /// Returns the same as [`Regex::captures`], but the complete match must
+    /// lie within the given byte `window` of the haystack.
+    ///
+    /// The window only restricts where the complete match may be reported;
+    /// the rest of the haystack remains visible to anchors, look-around and
+    /// word boundary assertions. The offsets of the overall match and of
+    /// every capture group are absolute byte offsets into the original
+    /// `haystack`.
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "xab";
+    /// let re = Regex::new("(a)(b)").unwrap();
+    /// let caps = re.captures_in(hay, 1..3).unwrap().unwrap();
+    /// assert_eq!(1..3, caps.get(0).unwrap().range());
+    /// // Capture offsets are also relative to the original haystack.
+    /// assert_eq!(1..2, caps.get(1).unwrap().range());
+    /// assert_eq!(2..3, caps.get(2).unwrap().range());
+    /// ```
+    #[inline]
+    pub fn captures_in<'h, R: RangeBounds<usize>>(
+        &self,
+        haystack: &'h str,
+        window: R,
+    ) -> Result<Option<Captures<'h>>, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        let mut caps = self.meta.create_captures();
+        self.meta.search_captures(&input, &mut caps);
+        if caps.is_match() {
+            let static_captures_len = self.static_captures_len();
+            Ok(Some(Captures { haystack, caps, static_captures_len }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Returns the same as [`Regex::captures_iter`], but every match yielded
+    /// must lie within the given byte `window` of the haystack.
+    ///
+    /// The window only restricts where complete matches are reported; the
+    /// bytes outside the window remain visible to anchors, look-around and
+    /// word boundary assertions. Every match and capture group carries
+    /// absolute byte offsets into the original `haystack`. Empty matches
+    /// follow the same non-overlapping iteration rules as
+    /// [`Regex::captures_iter`].
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "xab yab";
+    /// let re = Regex::new("(a)(b)").unwrap();
+    /// let all: Vec<_> = re
+    ///     .captures_iter_in(hay, 0..4)
+    ///     .unwrap()
+    ///     .map(|caps| {
+    ///         (
+    ///             caps.get(0).unwrap().range(),
+    ///             caps.get(1).unwrap().range(),
+    ///             caps.get(2).unwrap().range(),
+    ///         )
+    ///     })
+    ///     .collect();
+    /// assert_eq!(all, vec![(1..3, 1..2, 2..3)]);
+    /// ```
+    #[inline]
+    pub fn captures_iter_in<'r, 'h, R: RangeBounds<usize>>(
+        &'r self,
+        haystack: &'h str,
+        window: R,
+    ) -> Result<CaptureMatches<'r, 'h>, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        Ok(CaptureMatches { haystack, it: self.meta.captures_iter(input) })
+    }
+
+    /// Returns the same as [`Regex::captures_read`], but the complete match
+    /// must lie within the given byte `window` of the haystack.
+    ///
+    /// The window only restricts where the complete match may be reported;
+    /// the rest of the haystack remains visible to anchors, look-around and
+    /// word boundary assertions. The offsets written into `locs` (including
+    /// those of the overall match at index `0`) are absolute byte offsets
+    /// into the original `haystack`.
+    ///
+    /// Both bounds of the window must fall on a [UTF-8 code point boundary];
+    /// otherwise a [`WindowError`] is returned.
+    ///
+    /// [UTF-8 code point boundary]: https://docs.rs/regex/latest/regex/struct.Regex.html#byte-offsets
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let hay = "xab";
+    /// let re = Regex::new("(a)(b)").unwrap();
+    /// let mut locs = re.capture_locations();
+    /// let m = re.captures_read_in(&mut locs, hay, 1..3).unwrap().unwrap();
+    /// assert_eq!(1..3, m.range());
+    /// assert_eq!(Some((1, 2)), locs.get(1));
+    /// assert_eq!(Some((2, 3)), locs.get(2));
+    /// ```
+    #[inline]
+    pub fn captures_read_in<'h, R: RangeBounds<usize>>(
+        &self,
+        locs: &mut CaptureLocations,
+        haystack: &'h str,
+        window: R,
+    ) -> Result<Option<Match<'h>>, WindowError> {
+        let input = window::input_str(haystack, window)?;
+        self.meta.search_captures(&input, &mut locs.0);
+        Ok(locs
+            .0
+            .get_match()
+            .map(|m| Match::new(haystack, m.start(), m.end())))
     }
 }
 

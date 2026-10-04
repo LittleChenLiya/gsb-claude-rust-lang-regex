@@ -2,6 +2,18 @@
 ============
 TODO
 
+New features:
+
+* A "windowed" search API has been added to both `regex::Regex` and
+`regex::bytes::Regex`: `is_match_in`, `find_in`, `find_iter_in`,
+`captures_in`, `captures_iter_in` and `captures_read_in`. Each accepts a
+byte range that limits where the *complete* match (including all captures)
+may be reported, while the rest of the haystack remains visible as
+boundary context for anchors and word boundaries. All reported offsets are
+absolute offsets into the original haystack. For `&str` haystacks, window
+bounds must lie on UTF-8 code point boundaries; invalid windows are
+rejected with the new `WindowError` type.
+
 Bug fixes:
 
 * [#1333](https://github.com/rust-lang/regex/issues/1333):
