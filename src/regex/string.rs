@@ -1008,7 +1008,185 @@ impl Regex {
         new.push_str(&haystack[last_match..]);
         Cow::Owned(new)
     }
+
+    /// Replaces at most `limit` non-overlapping matches in `haystack` with
+    /// the replacement provided, but fails if the result would exceed
+    /// `budget` bytes.
+    ///
+    /// This is like [`Regex::replacen`], except that the total number of
+    /// bytes written to the output is bounded by an explicit byte `budget`.
+    /// The budget accounts for _everything_ that would be returned: both the
+    /// replacement text (whether from a fixed string or from a [`Replacer`]
+    /// callback) and the unmatched portions of the haystack that are copied
+    /// to the output. For `&str` haystacks, multi-byte UTF-8 encoded code
+    /// points count for as many bytes as their UTF-8 encoding occupies.
+    ///
+    /// The budget is checked incrementally as the output is built. If it
+    /// would be exceeded, this returns a [`BudgetExceeded`] error and no
+    /// string is returned at all. The full (potentially huge) result is
+    /// never materialized just to be thrown away. Note that a [`Replacer`]
+    /// callback is still invoked at most once per match, and a single
+    /// callback invocation may itself push the output past the budget before
+    /// the next check occurs.
+    ///
+    /// If `limit` is non-zero, then at most `limit` replacements are made,
+    /// just like [`Regex::replacen`]. Zero-width matches are handled exactly
+    /// like the other replacement routines: iteration always advances after
+    /// a zero-width match, so they cannot cause an infinite loop.
+    ///
+    /// The haystack is never modified. When no matches are found, the
+    /// haystack is returned unchanged as a borrowed value (provided it fits
+    /// within `budget`).
+    ///
+    /// # Examples
+    ///
+    /// Three matches, each replaced by the two-byte UTF-8 encoding of `é`,
+    /// fit exactly in a budget of 6 bytes:
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"[a-z]").unwrap();
+    /// let mut calls = 0;
+    /// let result = re.try_replacen("abc", 0, 6, |_: &regex::Captures<'_>| {
+    ///     calls += 1;
+    ///     "é"
+    /// });
+    /// assert_eq!(result.unwrap(), "ééé");
+    /// assert_eq!(calls, 3);
+    ///
+    /// // One byte less and the replacement fails instead of returning
+    /// // a truncated string.
+    /// let result = re.try_replacen("abc", 0, 5, "é");
+    /// assert!(result.is_err());
+    /// ```
+    ///
+    /// Zero-width matches advance and terminate normally:
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"").unwrap();
+    /// let result = re.try_replacen("ab", 0, 5, "-").unwrap();
+    /// assert_eq!(result, "-a-b-");
+    /// ```
+    #[inline]
+    pub fn try_replacen<'h, R: Replacer>(
+        &self,
+        haystack: &'h str,
+        limit: usize,
+        budget: usize,
+        mut rep: R,
+    ) -> Result<Cow<'h, str>, BudgetExceeded> {
+        // If we know that the replacement doesn't have any capture
+        // expansions, then we can use the fast path, just like `replacen`.
+        if let Some(rep) = rep.no_expansion() {
+            let mut it = self.find_iter(haystack).enumerate().peekable();
+            if it.peek().is_none() {
+                return if haystack.len() <= budget {
+                    Ok(Cow::Borrowed(haystack))
+                } else {
+                    Err(BudgetExceeded::new(budget))
+                };
+            }
+            let mut new = String::with_capacity(haystack.len().min(budget));
+            let mut last_match = 0;
+            for (i, m) in it {
+                let unmatched = &haystack[last_match..m.start()];
+                if unmatched.len() > budget - new.len() {
+                    return Err(BudgetExceeded::new(budget));
+                }
+                new.push_str(unmatched);
+                if rep.len() > budget - new.len() {
+                    return Err(BudgetExceeded::new(budget));
+                }
+                new.push_str(&rep);
+                last_match = m.end();
+                if limit > 0 && i >= limit - 1 {
+                    break;
+                }
+            }
+            let unmatched = &haystack[last_match..];
+            if unmatched.len() > budget - new.len() {
+                return Err(BudgetExceeded::new(budget));
+            }
+            new.push_str(unmatched);
+            return Ok(Cow::Owned(new));
+        }
+
+        // The slower path, which we use if the replacement may need access
+        // to capture groups. The replacer is called at most once per match,
+        // and the budget is re-checked after every append so that an
+        // over-budget result is never fully built.
+        let mut it = self.captures_iter(haystack).enumerate().peekable();
+        if it.peek().is_none() {
+            return if haystack.len() <= budget {
+                Ok(Cow::Borrowed(haystack))
+            } else {
+                Err(BudgetExceeded::new(budget))
+            };
+        }
+        let mut new = String::with_capacity(haystack.len().min(budget));
+        let mut last_match = 0;
+        for (i, cap) in it {
+            // unwrap on 0 is OK because captures only reports matches
+            let m = cap.get(0).unwrap();
+            let unmatched = &haystack[last_match..m.start()];
+            if unmatched.len() > budget - new.len() {
+                return Err(BudgetExceeded::new(budget));
+            }
+            new.push_str(unmatched);
+            rep.replace_append(&cap, &mut new);
+            if new.len() > budget {
+                return Err(BudgetExceeded::new(budget));
+            }
+            last_match = m.end();
+            if limit > 0 && i >= limit - 1 {
+                break;
+            }
+        }
+        let unmatched = &haystack[last_match..];
+        if unmatched.len() > budget - new.len() {
+            return Err(BudgetExceeded::new(budget));
+        }
+        new.push_str(unmatched);
+        Ok(Cow::Owned(new))
+    }
 }
+
+/// An error returned by [`Regex::try_replacen`] (and
+/// [`bytes::Regex::try_replacen`](crate::bytes::Regex::try_replacen)) when
+/// the replacement output would exceed the given byte budget.
+///
+/// When this error is returned, no output string is produced at all. In
+/// particular, a partially built (truncated) result is never returned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BudgetExceeded {
+    budget: usize,
+}
+
+impl BudgetExceeded {
+    /// Creates a new error for the given byte budget.
+    pub(crate) fn new(budget: usize) -> BudgetExceeded {
+        BudgetExceeded { budget }
+    }
+
+    /// Returns the byte budget that the replacement output would have
+    /// exceeded.
+    #[inline]
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+}
+
+impl core::fmt::Display for BudgetExceeded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "replacement output exceeds byte budget of {}", self.budget)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for BudgetExceeded {}
 
 /// A group of advanced or "lower level" search methods. Some methods permit
 /// starting the search at a position greater than `0` in the haystack. Other

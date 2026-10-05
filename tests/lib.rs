@@ -5,6 +5,7 @@ mod misc;
 mod regression;
 mod regression_fuzz;
 mod replace;
+mod replace_bounded;
 #[cfg(feature = "pattern")]
 mod searcher;
 mod suite_bytes;

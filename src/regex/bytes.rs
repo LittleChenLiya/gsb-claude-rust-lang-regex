@@ -4,6 +4,8 @@ use regex_automata::{meta, util::captures, Input, PatternID};
 
 use crate::{bytes::RegexBuilder, error::Error};
 
+pub use crate::regex::string::BudgetExceeded;
+
 /// A convenient way to construct regex patterns from string literals.
 ///
 /// This macro can be used to construct reusable instances of [`Regex`] with
@@ -1024,6 +1026,141 @@ impl Regex {
         }
         new.extend_from_slice(&haystack[last_match..]);
         Cow::Owned(new)
+    }
+
+    /// Replaces at most `limit` non-overlapping matches in `haystack` with
+    /// the replacement provided, but fails if the result would exceed
+    /// `budget` bytes.
+    ///
+    /// This is like [`Regex::replacen`], except that the total number of
+    /// bytes written to the output is bounded by an explicit byte `budget`.
+    /// The budget accounts for _everything_ that would be returned: both the
+    /// replacement text (whether from a fixed byte string or from a
+    /// [`Replacer`] callback) and the unmatched portions of the haystack
+    /// that are copied to the output.
+    ///
+    /// The budget is checked incrementally as the output is built. If it
+    /// would be exceeded, this returns a [`BudgetExceeded`] error and no
+    /// output is returned at all. The full (potentially huge) result is
+    /// never materialized just to be thrown away. Note that a [`Replacer`]
+    /// callback is still invoked at most once per match, and a single
+    /// callback invocation may itself push the output past the budget before
+    /// the next check occurs.
+    ///
+    /// If `limit` is non-zero, then at most `limit` replacements are made,
+    /// just like [`Regex::replacen`]. Zero-width matches are handled exactly
+    /// like the other replacement routines: iteration always advances after
+    /// a zero-width match, so they cannot cause an infinite loop.
+    ///
+    /// The haystack is never modified. When no matches are found, the
+    /// haystack is returned unchanged as a borrowed value (provided it fits
+    /// within `budget`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use regex::bytes::Regex;
+    ///
+    /// let re = Regex::new(r"[a-z]").unwrap();
+    /// let mut calls = 0;
+    /// let result = re.try_replacen(
+    ///     b"abc",
+    ///     0,
+    ///     6,
+    ///     |_: &regex::bytes::Captures<'_>| {
+    ///         calls += 1;
+    ///         "é".as_bytes().to_vec()
+    ///     },
+    /// );
+    /// assert_eq!(result.unwrap().as_ref(), "ééé".as_bytes());
+    /// assert_eq!(calls, 3);
+    ///
+    /// // One byte less and the replacement fails instead of returning
+    /// // a truncated result.
+    /// let result = re.try_replacen(b"abc", 0, 5, &b"xx"[..]);
+    /// assert!(result.is_err());
+    /// ```
+    #[inline]
+    pub fn try_replacen<'h, R: Replacer>(
+        &self,
+        haystack: &'h [u8],
+        limit: usize,
+        budget: usize,
+        mut rep: R,
+    ) -> Result<Cow<'h, [u8]>, BudgetExceeded> {
+        // If we know that the replacement doesn't have any capture
+        // expansions, then we can use the fast path, just like `replacen`.
+        if let Some(rep) = rep.no_expansion() {
+            let mut it = self.find_iter(haystack).enumerate().peekable();
+            if it.peek().is_none() {
+                return if haystack.len() <= budget {
+                    Ok(Cow::Borrowed(haystack))
+                } else {
+                    Err(BudgetExceeded::new(budget))
+                };
+            }
+            let mut new = Vec::with_capacity(haystack.len().min(budget));
+            let mut last_match = 0;
+            for (i, m) in it {
+                let unmatched = &haystack[last_match..m.start()];
+                if unmatched.len() > budget - new.len() {
+                    return Err(BudgetExceeded::new(budget));
+                }
+                new.extend_from_slice(unmatched);
+                if rep.len() > budget - new.len() {
+                    return Err(BudgetExceeded::new(budget));
+                }
+                new.extend_from_slice(&rep);
+                last_match = m.end();
+                if limit > 0 && i >= limit - 1 {
+                    break;
+                }
+            }
+            let unmatched = &haystack[last_match..];
+            if unmatched.len() > budget - new.len() {
+                return Err(BudgetExceeded::new(budget));
+            }
+            new.extend_from_slice(unmatched);
+            return Ok(Cow::Owned(new));
+        }
+
+        // The slower path, which we use if the replacement needs access to
+        // capture groups. The replacer is called at most once per match,
+        // and the budget is re-checked after every append so that an
+        // over-budget result is never fully built.
+        let mut it = self.captures_iter(haystack).enumerate().peekable();
+        if it.peek().is_none() {
+            return if haystack.len() <= budget {
+                Ok(Cow::Borrowed(haystack))
+            } else {
+                Err(BudgetExceeded::new(budget))
+            };
+        }
+        let mut new = Vec::with_capacity(haystack.len().min(budget));
+        let mut last_match = 0;
+        for (i, cap) in it {
+            // unwrap on 0 is OK because captures only reports matches
+            let m = cap.get(0).unwrap();
+            let unmatched = &haystack[last_match..m.start()];
+            if unmatched.len() > budget - new.len() {
+                return Err(BudgetExceeded::new(budget));
+            }
+            new.extend_from_slice(unmatched);
+            rep.replace_append(&cap, &mut new);
+            if new.len() > budget {
+                return Err(BudgetExceeded::new(budget));
+            }
+            last_match = m.end();
+            if limit > 0 && i >= limit - 1 {
+                break;
+            }
+        }
+        let unmatched = &haystack[last_match..];
+        if unmatched.len() > budget - new.len() {
+            return Err(BudgetExceeded::new(budget));
+        }
+        new.extend_from_slice(unmatched);
+        Ok(Cow::Owned(new))
     }
 }
 
