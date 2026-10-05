@@ -99,3 +99,55 @@ impl core::fmt::Debug for Error {
         }
     }
 }
+
+/// An error returned by bounded replacement routines when the output would
+/// exceed a configured byte budget.
+///
+/// The byte budget counts the entire replacement result: every unmatched byte
+/// copied from the haystack plus every byte produced by the replacement
+/// callback. If the budget is exceeded, the routine returns this error
+/// *before* producing any output, so no half-built string is ever returned.
+///
+/// See [`Regex::replace_all_bounded`](crate::Regex::replace_all_bounded) for
+/// more details and examples.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedReplaceError {
+    budget: usize,
+    needed: usize,
+}
+
+impl BoundedReplaceError {
+    /// Creates a new bounded replacement error.
+    pub(crate) fn new(budget: usize, needed: usize) -> BoundedReplaceError {
+        BoundedReplaceError { budget, needed }
+    }
+
+    /// Returns the byte budget that was exceeded.
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// Returns the number of output bytes that would have been used up to and
+    /// including the match that caused the budget to be exceeded.
+    ///
+    /// This is a lower bound on the total size of the replacement result,
+    /// since matches after the failing one have not yet been processed.
+    pub fn needed(&self) -> usize {
+        self.needed
+    }
+}
+
+impl core::fmt::Display for BoundedReplaceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "bounded replacement exceeded byte budget: needed at least {} \
+             bytes but the budget is {} bytes",
+            self.needed, self.budget,
+        )
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for BoundedReplaceError {}

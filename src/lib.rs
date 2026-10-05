@@ -1358,7 +1358,7 @@ extern crate alloc;
 #[cfg(any(test, feature = "std"))]
 extern crate std;
 
-pub use crate::error::Error;
+pub use crate::error::{BoundedReplaceError, Error};
 
 pub use crate::{builders::string::*, regex::string::*, regexset::string::*};
 

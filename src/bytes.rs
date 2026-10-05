@@ -90,6 +90,8 @@ performance on `&str`.
 */
 pub use crate::{builders::bytes::*, regex::bytes::*, regexset::bytes::*};
 
+pub use crate::error::{BoundedReplaceError, Error};
+
 // Re-export the public but hidden macro to make it usable as `bytes::regex`.
 #[doc(inline)]
 pub use crate::__bytes_regex as regex;

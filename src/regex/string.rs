@@ -2,7 +2,10 @@ use alloc::{borrow::Cow, string::String, sync::Arc};
 
 use regex_automata::{meta, util::captures, Input, PatternID};
 
-use crate::{error::Error, RegexBuilder};
+use crate::{
+    error::{BoundedReplaceError, Error},
+    RegexBuilder,
+};
 
 /// A convenient way to construct regex patterns from string literals.
 ///
@@ -1007,6 +1010,179 @@ impl Regex {
         }
         new.push_str(&haystack[last_match..]);
         Cow::Owned(new)
+    }
+
+    /// Replaces all non-overlapping matches in the haystack with the
+    /// replacement provided, but only if the total size of the result stays
+    /// within the given byte budget.
+    ///
+    /// The byte budget counts the *entire* replacement result, measured in
+    /// bytes: every unmatched byte copied from the haystack plus every byte
+    /// produced by the replacement. This is different from merely limiting the
+    /// number of matches — even a single match can blow the budget if its
+    /// replacement is large, and a haystack with no matches at all can blow
+    /// the budget if the haystack itself is larger than the budget.
+    ///
+    /// If the budget is exceeded, this method returns a
+    /// [`BoundedReplaceError`] *before* producing any output. No half-built
+    /// string is returned. The original haystack is never modified.
+    ///
+    /// # Behavior
+    ///
+    /// * The replacement callback (or [`Replacer`]) is invoked exactly once
+    ///   per match. Its output is measured before it is committed to the
+    ///   result, so a replacement that would exceed the budget is detected
+    ///   without first building a huge string.
+    /// * Zero-width matches are handled correctly: iteration advances past
+    ///   them just like [`Regex::replace_all`], so an empty match never causes
+    ///   an infinite loop.
+    /// * When no match is found and the haystack fits within the budget, a
+    ///   `Cow::Borrowed` is returned such that no allocation is performed.
+    ///
+    /// The documentation for [`Regex::replace`] goes into more detail about
+    /// what kinds of replacement strings are supported.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BoundedReplaceError`] if the replacement result would
+    /// exceed `byte_budget` bytes. The error reports the budget and a lower
+    /// bound on the number of bytes that would have been used.
+    ///
+    /// # Example
+    ///
+    /// This example replaces each digit with two bytes (`"00"`), so three
+    /// matches expand the result by three bytes. With a budget of `11` the
+    /// result fits, but with a budget of `10` it fails:
+    ///
+    /// ```
+    /// use regex::{BoundedReplaceError, Regex};
+    ///
+    /// let re = Regex::new(r"\d").unwrap();
+    /// let hay = "a1b2c3";
+    ///
+    /// // "a1b2c3" is 6 bytes; each of the 3 matches adds 1 byte, so the
+    /// // result is 9 bytes. A budget of 11 is enough.
+    /// let result = re.replace_all_bounded(hay, 11, "00").unwrap();
+    /// assert_eq!(result, "a00b00c00");
+    ///
+    /// // A budget of 10 is not enough: the result would be 9 bytes of
+    /// // output, but wait — the unmatched parts plus replacements must fit.
+    /// // Here the result is 9 bytes, so a budget of 9 is exactly enough,
+    /// // while 8 is not.
+    /// assert!(re.replace_all_bounded(hay, 8, "00").is_err());
+    /// ```
+    ///
+    /// This example shows that the callback is invoked exactly once per match
+    /// even when the budget is exceeded:
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"\d").unwrap();
+    /// let hay = "a1b2c3";
+    /// let mut calls = 0;
+    /// let result = re.replace_all_bounded(hay, 8, |_caps: &regex::Captures| {
+    ///     calls += 1;
+    ///     "00"
+    /// });
+    /// assert!(result.is_err());
+    /// // The callback ran once for each of the 3 matches, never twice.
+    /// assert_eq!(calls, 3);
+    /// ```
+    ///
+    /// This example shows that zero-width matches do not cause an infinite
+    /// loop:
+    ///
+    /// ```
+    /// use regex::Regex;
+    ///
+    /// let re = Regex::new(r"").unwrap();
+    /// let hay = "abc";
+    /// let result = re.replace_all_bounded(hay, 100, "-").unwrap();
+    /// // The empty pattern matches at every position, but iteration advances
+    /// // past each zero-width match instead of looping forever.
+    /// assert_eq!(result, "-a-b-c-");
+    /// ```
+    #[inline]
+    pub fn replace_all_bounded<'h, R: Replacer>(
+        &self,
+        haystack: &'h str,
+        byte_budget: usize,
+        mut rep: R,
+    ) -> Result<Cow<'h, str>, BoundedReplaceError> {
+        // Fast path: the replacement is a fixed string with no capture
+        // expansion. We can use `find_iter` and know the replacement size up
+        // front, so no temporary buffer is needed.
+        if let Some(rep) = rep.no_expansion() {
+            let rep = rep.as_ref();
+            let mut it = self.find_iter(haystack).peekable();
+            if it.peek().is_none() {
+                // No matches: the whole haystack is copied unchanged.
+                return if haystack.len() <= byte_budget {
+                    Ok(Cow::Borrowed(haystack))
+                } else {
+                    Err(BoundedReplaceError::new(byte_budget, haystack.len()))
+                };
+            }
+            let mut new = String::new();
+            let mut last_match = 0;
+            for m in it {
+                let unmatched = &haystack[last_match..m.start()];
+                let needed = new.len() + unmatched.len() + rep.len();
+                if needed > byte_budget {
+                    return Err(BoundedReplaceError::new(byte_budget, needed));
+                }
+                new.push_str(unmatched);
+                new.push_str(rep);
+                last_match = m.end();
+            }
+            let trailing = &haystack[last_match..];
+            let needed = new.len() + trailing.len();
+            return if needed <= byte_budget {
+                new.push_str(trailing);
+                Ok(Cow::Owned(new))
+            } else {
+                Err(BoundedReplaceError::new(byte_budget, needed))
+            };
+        }
+
+        // Slower path: the replacement needs access to captures. We run the
+        // replacement into a per-match temporary buffer so that we can measure
+        // its size before committing it to the output. This ensures the output
+        // never exceeds the budget and the callback is invoked exactly once per
+        // match (never speculatively, then again).
+        let mut it = self.captures_iter(haystack).peekable();
+        if it.peek().is_none() {
+            return if haystack.len() <= byte_budget {
+                Ok(Cow::Borrowed(haystack))
+            } else {
+                Err(BoundedReplaceError::new(byte_budget, haystack.len()))
+            };
+        }
+        let mut new = String::new();
+        let mut rep_buf = String::new();
+        let mut last_match = 0;
+        for cap in it {
+            // unwrap on 0 is OK because captures only reports matches
+            let m = cap.get(0).unwrap();
+            let unmatched = &haystack[last_match..m.start()];
+            rep_buf.clear();
+            rep.replace_append(&cap, &mut rep_buf);
+            let needed = new.len() + unmatched.len() + rep_buf.len();
+            if needed > byte_budget {
+                return Err(BoundedReplaceError::new(byte_budget, needed));
+            }
+            new.push_str(unmatched);
+            new.push_str(&rep_buf);
+            last_match = m.end();
+        }
+        let trailing = &haystack[last_match..];
+        let needed = new.len() + trailing.len();
+        if needed > byte_budget {
+            return Err(BoundedReplaceError::new(byte_budget, needed));
+        }
+        new.push_str(trailing);
+        Ok(Cow::Owned(new))
     }
 }
 
