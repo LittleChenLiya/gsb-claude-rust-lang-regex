@@ -242,6 +242,10 @@ features = ["atty", "humantime", "termcolor"]
 path = "tests/lib.rs"
 name = "integration"
 
+[[test]]
+path = "tests/rename.rs"
+name = "rename"
+
 [package.metadata.docs.rs]
 # We want to document all features.
 all-features = true
