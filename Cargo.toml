@@ -242,6 +242,12 @@ features = ["atty", "humantime", "termcolor"]
 path = "tests/lib.rs"
 name = "integration"
 
+# Targeted tests for the explicit capture group renamer in `regex::rename`.
+# Run them with: cargo test --test rename
+[[test]]
+path = "tests/rename.rs"
+name = "rename"
+
 [package.metadata.docs.rs]
 # We want to document all features.
 all-features = true
